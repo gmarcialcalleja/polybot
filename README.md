@@ -7,7 +7,7 @@ Python + BeautifulSoup bot that posts up to three distinct-player Polymarket poi
 1. In the destination Discord server, open the channel's **Edit Channel → Integrations → Webhooks → New Webhook**, select the channel, and copy the webhook URL. You need permission to manage webhooks.
 2. Open [this repository's Actions secrets](https://github.com/gmarcialcalleja/polybot/settings/secrets/actions).
 3. Select **New repository secret**. Name it exactly **`DISCORD_WEBHOOK_URL`** and paste the entire URL as its value.
-4. Open **Actions → Daily NBA Discord report → Run workflow**. Keep `dry_run` checked for a preview artifact; uncheck it to deliver to Discord.
+4. Open **Actions → Daily NBA Discord report → Run workflow**. Keep `dry_run` checked for live-source diagnostics and a preview artifact; uncheck it to deliver to Discord.
 
 You do not need to send anyone the URL, commit it, or add a separate Discord bot token. No Polymarket API key, wallet, or private key is needed: this program only reads public data and publishes a report. It never places trades. No Kalshi integration is included because this project targets Polymarket.
 
