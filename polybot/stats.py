@@ -157,9 +157,11 @@ def parse_logs(html, before):
 
 
 def parse_espn_logs(data, before):
-    """Public ESPN fallback; regular-season, played, completed games only."""
+    """Public ESPN game logs; regular-season, played, completed games only."""
     labels = data.get('labels', [])
     if not {'MIN', 'PTS'}.issubset(labels):
+        if 'filters' in data and not data.get('events') and not data.get('seasonTypes'):
+            return []  # Valid empty season, e.g. before this player's NBA debut.
         raise SourceError('ESPN: game-log labels missing')
     metadata = data.get('events', {})
     games = {}

@@ -118,7 +118,7 @@ class VenueTests(unittest.TestCase):
              patch('polybot.__main__.kalshi.contracts', return_value=[kal]), \
              patch('polybot.__main__.rosters', return_value={'donovanmitchell': player}), \
              patch('polybot.__main__.defense', return_value=({p: {'ATL': 27} for p in POSITIONS}, {})), \
-             patch('polybot.__main__.StatMuse') as muse, \
+             patch('polybot.__main__.ESPN') as muse, \
              patch('polybot.__main__.quote', return_value={'price': .25, 'depth_usd': 100}), \
              patch('polybot.__main__.kalshi.quote', return_value={'price': .25, 'fee_per_share': .02, 'depth_usd': 100}):
             muse.return_value.player.return_value = stats

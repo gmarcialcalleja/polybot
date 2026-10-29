@@ -67,7 +67,7 @@ def payload(report):
                  f"{estimate['baseline_sample']} baseline matchups; ${pick['depth_usd']:.2f} at ask", 'inline': False},
                 {'name': 'Notes', 'value': '\n'.join(([pick['settlement_note']] if pick.get('settlement_note') else []) + estimate['notes'])[:400], 'inline': False},
             ],
-            'footer': {'text': f'StatMuse / ESPN stats · Hashtag Basketball DvP · ESPN availability · {venue} order book'},
+            'footer': {'text': f'ESPN stats & availability · Hashtag Basketball DvP · {venue} order book'},
         })
     return {'content': summary[:2000], 'embeds': embeds, 'allowed_mentions': {'parse': []}}
 

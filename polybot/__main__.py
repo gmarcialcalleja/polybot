@@ -10,10 +10,11 @@ from zoneinfo import ZoneInfo
 
 from .http import Http, SourceError
 from . import kalshi
+from .espn import ESPN
 from .markets import (available, contracts, event_spread, nba_events, quote, rosters, slate)
 from .model import estimate, high_roi_picks, top_picks, value
 from .report import payloads, send
-from .stats import POSITIONS, StatMuse, defense, normalize, team
+from .stats import POSITIONS, defense, normalize, team
 
 
 def analyze(http, day, tz, stake):
@@ -52,7 +53,7 @@ def analyze(http, day, tz, stake):
         ranks, source = defense(http, day)
         report['sources']['defense'] = source
         players = rosters(http, games)
-        muse = StatMuse(http)
+        stats_provider = ESPN(http)
         stats_cache = {}
         stats_errors = {}
         position_cache = {}
@@ -82,7 +83,7 @@ def analyze(http, day, tz, stake):
                         raise SourceError(position_errors[key])
                     if key not in position_cache:
                         try:
-                            position_cache[key] = muse.position(player['name'], day)
+                            position_cache[key] = stats_provider.position(player['name'], day, player.get('id'))
                         except SourceError as exc:
                             position_errors[key] = str(exc)
                             stats_errors[key] = str(exc)
@@ -96,15 +97,14 @@ def analyze(http, day, tz, stake):
                 if key not in stats_cache:
                     try:
                         print(f"Loading game history: {player['name']}", flush=True)
-                        stats_cache[key] = muse.player(player['name'], day, player.get('id'))
+                        stats_cache[key] = stats_provider.player(player['name'], day, player.get('id'))
                     except SourceError as exc:
                         stats_errors[key] = str(exc)
                         raise
                 stats = stats_cache[key]
                 model = estimate(stats, contract['threshold'], position, ranks, day,
                                  event_spread(events, player))
-                if any('ESPN' in source for source in stats.log_sources):
-                    model.notes.insert(0, 'Game logs include the ESPN public fallback; StatMuse tables were unavailable.')
+                model.notes.insert(0, 'ESPN game logs; usage estimated from box scores and team totals (rounded player minutes).')
                 market_quote = (kalshi.quote(http, contract, stake) if venue == 'Kalshi'
                                 else quote(http, contract, stake))
                 metrics = value(model.probability, market_quote['price'],
@@ -113,7 +113,8 @@ def analyze(http, day, tz, stake):
                 candidate = {**contract, **market_quote, **metrics, 'player': player['name'],
                              'team': player['team'], 'position': position, 'opponent': player['opponent'],
                              'position_source': position_source, 'defense_rank': rank,
-                             'estimate': asdict(model), 'statmuse_profile': stats.profile,
+                             'estimate': asdict(model), 'stats_profile': stats.profile,
+                             'stats_provider': 'ESPN', 'usage': stats.usage, 'prior_usage': stats.prior_usage,
                              'game_log_sources': stats.log_sources}
                 # Sets are only internal matching metadata.
                 candidate.pop('teams', None)
@@ -193,13 +194,15 @@ def main():
     http = Http()
     if args.check_sources:
         ranks, source = defense(http, today)
-        stats = StatMuse(http).player('LeBron James', today, '1966')
+        provider = ESPN(http)
+        stats = provider.player('LeBron James', today, '1966')
         result = {'defense': source, 'positions': len(ranks), 'game_logs': len(stats.games),
                   'game_log_sources': stats.log_sources,
                   'usage': stats.usage, 'prior_usage': stats.prior_usage, 'profile': stats.profile,
                   'nba_events_today': len(nba_events(http, today, tz)),
                   'kalshi_points_contracts_today': len(kalshi.contracts(http, today)),
-                  'position_check': StatMuse(http).position('Donovan Mitchell', today)}
+                  'position_check': provider.position('Donovan Mitchell', today, '3908809'),
+                  'stats_provider': 'ESPN'}
         print(json.dumps(result, indent=2))
         return 0
     webhook = os.environ.get('DISCORD_WEBHOOK_URL', '')
