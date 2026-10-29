@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from polybot.http import SourceError
 from polybot.markets import available, parse_contract, quote
-from polybot.model import estimate, top_picks, value
+from polybot.model import estimate, high_roi_picks, top_picks, value
 from polybot.report import payload, send
 from polybot.stats import GameLog, PlayerStats, POSITIONS, TEAMS, normalize, parse_defense, parse_logs
 
@@ -48,6 +48,19 @@ class ModelTests(unittest.TestCase):
         picks = top_picks([{'player': 'A', 'edge': .1}, {'player': 'A', 'edge': .2},
                            {'player': 'B', 'edge': 0}, {'player': 'C', 'edge': .05}])
         self.assertEqual([p['player'] for p in picks], ['A', 'C'])
+
+    def test_expected_roi_differs_from_win_roi_and_strict_threshold(self):
+        metrics = value(.6, .25)
+        self.assertAlmostEqual(metrics['expected_roi'], 1.4)
+        self.assertAlmostEqual(metrics['win_roi'], 3)
+        picks = high_roi_picks([
+            {'player': 'Boundary', **value(.5, .25)},
+            {'player': 'A', **metrics},
+            {'player': 'A', **value(.7, .25)},
+            {'player': 'Low probability', **value(.1, .2)},
+        ])
+        self.assertEqual([p['player'] for p in picks], ['A'])
+        self.assertAlmostEqual(picks[0]['expected_roi'], 1.8)
 
 
 class ParsingTests(unittest.TestCase):
@@ -126,6 +139,31 @@ class DeliveryTests(unittest.TestCase):
                            'contracts_found': 0, 'valued': 0, 'picks': [], 'message': 'No contracts published.'})
         self.assertIn('No contracts published.', message['content'])
         self.assertEqual(message['allowed_mentions'], {'parse': []})
+
+    def test_unvalued_report_shows_actual_skip_reasons(self):
+        message = payload({'date': '2026-10-28', 'timezone': 'America/New_York', 'status': 'ok',
+                           'contracts_found': 222, 'valued': 0, 'picks': [],
+                           'skipped_reasons': {'game already started or not in pregame state': 222}})
+        self.assertIn('222: game already started', message['content'])
+        self.assertIn('ROI >100% could not be assessed', message['content'])
+        self.assertNotIn('morning snapshot', message['content'])
+
+    def test_roi_alerts_outside_top_edge_picks_are_shown_without_duplicate_embeds(self):
+        def pick(ident, probability, price):
+            return {'id': ident, 'player': ident, 'threshold': 25, 'url': 'https://polymarket.com',
+                    'team': 'ATL', 'position': 'PG', 'opponent': 'BOS', 'defense_rank': 25,
+                    'price': price, 'depth_usd': 100, **value(probability, price),
+                    'estimate': {'probability': probability, 'hits': 3, 'sample': 5,
+                                 'baseline_sample': 20, 'notes': ['Sample note']}}
+        edge_pick, roi_pick = pick('A', .9, .4), pick('B', .6, .2)
+        report = {'date': '2026-10-29', 'timezone': 'America/New_York', 'status': 'ok',
+                  'contracts_found': 2, 'valued': 2, 'picks': [edge_pick],
+                  'high_roi_picks': [roi_pick, edge_pick], 'high_roi_contracts': 2}
+        message = payload(report)
+        self.assertEqual(len(message['embeds']), 2)
+        self.assertTrue(all('ROI >100%' in e['title'] for e in message['embeds']))
+        field = next(f for f in message['embeds'][1]['fields'] if f['name'] == 'Estimated expected ROI')
+        self.assertIn('+200.0%', field['value'])
 
 
 if __name__ == '__main__':

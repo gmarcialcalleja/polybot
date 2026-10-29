@@ -2,7 +2,7 @@ name: Daily NBA Discord report
 
 on:
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '0 14 * * *'
       timezone: America/New_York
   workflow_dispatch:
     inputs:

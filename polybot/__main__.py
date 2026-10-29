@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .http import Http, SourceError
 from .markets import (available, contracts, event_spread, nba_events, quote, rosters, slate)
-from .model import estimate, top_picks, value
+from .model import estimate, high_roi_picks, top_picks, value
 from .report import payload, send
 from .stats import POSITIONS, StatMuse, defense, normalize, team
 
@@ -18,7 +18,8 @@ from .stats import POSITIONS, StatMuse, defense, normalize, team
 def analyze(http, day, tz, stake):
     report = {'date': str(day), 'timezone': str(tz), 'generated_at': datetime.now(timezone.utc).isoformat(),
               'status': 'ok', 'contracts_found': 0, 'valued': 0, 'picks': [], 'candidates': [],
-              'skipped': [], 'sources': {}, 'unit_usd': stake}
+              'skipped': [], 'sources': {}, 'unit_usd': stake, 'high_roi_picks': [],
+              'high_roi_contracts': 0}
     try:
         games = slate(http, day, tz)
         report['games'] = [{'teams': [s['team'] for s in g['teams']], 'start': g['start'].isoformat()}
@@ -84,12 +85,16 @@ def analyze(http, day, tz, stake):
                 report['skipped'].append({'player': name, 'market': contract['id'], 'reason': str(exc)})
         report['candidates'] = candidates
         report['picks'] = top_picks(candidates)
+        report['high_roi_picks'] = high_roi_picks(candidates)
+        report['high_roi_contracts'] = sum(p['expected_roi'] > 1 for p in candidates)
         report['skipped_reasons'] = dict(Counter(s['reason'] for s in report['skipped']))
         if stats_errors:
             report['status'] = 'degraded'
             report['error'] = f'{len(stats_errors)} player stats fetches failed; see the report artifact.'
         if not report['picks']:
-            report['message'] = 'No qualifying positive-edge picks after eligibility, sample, price and liquidity checks.'
+            report['message'] = ('No contracts could be valued; screening reasons are listed below.'
+                                 if not report['valued'] else
+                                 'No positive-edge picks among the contracts that could be valued.')
         return report
     except SourceError as exc:
         report['status'] = 'failed'

@@ -67,7 +67,20 @@ def value(probability, price, kelly_fraction=0.25):
         raise ValueError('invalid probability or contract price')
     edge = probability - price
     return {'edge': edge, 'ev_per_dollar': probability/price - 1,
+            'expected_roi': probability/price - 1, 'win_roi': 1/price - 1,
             'fractional_kelly': max(0, edge/(1-price))*kelly_fraction}
+
+
+def high_roi_picks(candidates, count=3):
+    """Strictly above 100% model expected ROI, independently ranked by ROI."""
+    picks, seen = [], set()
+    for pick in sorted(candidates, key=lambda p: p['expected_roi'], reverse=True):
+        if pick['expected_roi'] > 1 and pick['player'] not in seen:
+            picks.append(pick)
+            seen.add(pick['player'])
+        if len(picks) == count:
+            break
+    return picks
 
 
 def top_picks(candidates, count=3):
