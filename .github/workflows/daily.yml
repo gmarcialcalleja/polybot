@@ -1,0 +1,52 @@
+name: Daily NBA Discord report
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+      timezone: America/New_York
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Generate an artifact without sending to Discord
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-nba-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Generate daily report
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPORT_TIMEZONE: America/New_York
+          UNIT_USD: ${{ vars.UNIT_USD || '10' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        shell: bash
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python -m polybot --dry-run
+          else
+            python -m polybot
+          fi
+      - name: Save report and screening audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-report-${{ github.run_id }}
+          path: reports/
+          retention-days: 14
+          if-no-files-found: ignore
