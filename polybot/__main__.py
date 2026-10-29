@@ -55,8 +55,11 @@ def analyze(http, day, tz, stake):
         muse = StatMuse(http)
         stats_cache = {}
         stats_errors = {}
+        position_cache = {}
+        position_errors = {}
         candidates = []
         now = datetime.now(timezone.utc)
+        print(f"Screening {len(props)} contracts across both exchanges...", flush=True)
         for contract in props:
             name = contract['player']
             venue = contract['venue']
@@ -73,8 +76,18 @@ def analyze(http, day, tz, stake):
                 if not available(player):
                     raise SourceError('inactive, unconfirmed injury status, or minutes restriction')
                 position = player['position']
+                position_source = 'ESPN roster'
                 if position not in POSITIONS:
-                    raise SourceError('primary PG/SG/SF/PF/C position unavailable')
+                    if key in position_errors:
+                        raise SourceError(position_errors[key])
+                    if key not in position_cache:
+                        try:
+                            position_cache[key] = muse.position(player['name'], day)
+                        except SourceError as exc:
+                            position_errors[key] = str(exc)
+                            stats_errors[key] = str(exc)
+                            raise
+                    position, position_source = position_cache[key]
                 rank = ranks[position][player['opponent']]
                 if rank < 21:
                     raise SourceError('opponent is not a bottom-10 positional defense')
@@ -82,13 +95,16 @@ def analyze(http, day, tz, stake):
                     raise SourceError(stats_errors[key])
                 if key not in stats_cache:
                     try:
-                        stats_cache[key] = muse.player(player['name'], day)
+                        print(f"Loading game history: {player['name']}", flush=True)
+                        stats_cache[key] = muse.player(player['name'], day, player.get('id'))
                     except SourceError as exc:
                         stats_errors[key] = str(exc)
                         raise
                 stats = stats_cache[key]
                 model = estimate(stats, contract['threshold'], position, ranks, day,
                                  event_spread(events, player))
+                if any('ESPN' in source for source in stats.log_sources):
+                    model.notes.insert(0, 'Game logs include the ESPN public fallback; StatMuse tables were unavailable.')
                 market_quote = (kalshi.quote(http, contract, stake) if venue == 'Kalshi'
                                 else quote(http, contract, stake))
                 metrics = value(model.probability, market_quote['price'],
@@ -96,7 +112,9 @@ def analyze(http, day, tz, stake):
                 report['valued'] += 1
                 candidate = {**contract, **market_quote, **metrics, 'player': player['name'],
                              'team': player['team'], 'position': position, 'opponent': player['opponent'],
-                             'defense_rank': rank, 'estimate': asdict(model), 'statmuse_profile': stats.profile}
+                             'position_source': position_source, 'defense_rank': rank,
+                             'estimate': asdict(model), 'statmuse_profile': stats.profile,
+                             'game_log_sources': stats.log_sources}
                 # Sets are only internal matching metadata.
                 candidate.pop('teams', None)
                 candidates.append(candidate)
@@ -157,6 +175,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='Write report without posting to Discord')
     parser.add_argument('--date', type=date.fromisoformat, help='Today or a future slate, YYYY-MM-DD')
     parser.add_argument('--check-sources', action='store_true', help='Live stats/schema smoke check; never posts')
+    parser.add_argument('--strict', action='store_true', help='Also exit nonzero for partial/degraded data')
     args = parser.parse_args()
     tz = ZoneInfo(os.environ.get('REPORT_TIMEZONE', 'America/New_York'))
     today = datetime.now(tz).date()
@@ -174,11 +193,13 @@ def main():
     http = Http()
     if args.check_sources:
         ranks, source = defense(http, today)
-        stats = StatMuse(http).player('LeBron James', today)
+        stats = StatMuse(http).player('LeBron James', today, '1966')
         result = {'defense': source, 'positions': len(ranks), 'game_logs': len(stats.games),
+                  'game_log_sources': stats.log_sources,
                   'usage': stats.usage, 'prior_usage': stats.prior_usage, 'profile': stats.profile,
                   'nba_events_today': len(nba_events(http, today, tz)),
-                  'kalshi_points_contracts_today': len(kalshi.contracts(http, today))}
+                  'kalshi_points_contracts_today': len(kalshi.contracts(http, today)),
+                  'position_check': StatMuse(http).position('Donovan Mitchell', today)}
         print(json.dumps(result, indent=2))
         return 0
     webhook = os.environ.get('DISCORD_WEBHOOK_URL', '')
@@ -198,7 +219,9 @@ def main():
         for message in messages:
             send(webhook, message)
         print('Discord exchange reports delivered.')
-    return 1 if report['status'] in ('failed', 'degraded') else 0
+    if report['status'] == 'degraded':
+        print('::warning::Report completed with partial data; inspect exchange statuses and screening reasons.')
+    return 1 if report['status'] == 'failed' or (args.strict and report['status'] == 'degraded') else 0
 
 
 if __name__ == '__main__':

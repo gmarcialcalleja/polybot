@@ -104,7 +104,7 @@ class VenueTests(unittest.TestCase):
     def test_both_venues_value_same_player_and_share_stats_fetch(self):
         game = {'teams': [{'team': 'CLE'}, {'team': 'ATL'}], 'spread': 5, 'state': 'pre',
                 'start': datetime.now(timezone.utc)+timedelta(hours=3)}
-        player = {'name': 'Donovan Mitchell', 'position': 'SG', 'team': 'CLE', 'opponent': 'ATL',
+        player = {'name': 'Donovan Mitchell', 'position': 'G', 'team': 'CLE', 'opponent': 'ATL',
                   'game': game, 'status': 'active', 'injuries': []}
         base = {'player': 'Donovan Mitchell', 'threshold': 25, 'teams': {'CLE', 'ATL'},
                 'url': 'https://example.com', 'event': 'example'}
@@ -122,10 +122,13 @@ class VenueTests(unittest.TestCase):
              patch('polybot.__main__.quote', return_value={'price': .25, 'depth_usd': 100}), \
              patch('polybot.__main__.kalshi.quote', return_value={'price': .25, 'fee_per_share': .02, 'depth_usd': 100}):
             muse.return_value.player.return_value = stats
+            muse.return_value.position.return_value = ('SG', 'https://statmuse.com/player')
             report = analyze(None, date(2026, 10, 29), ZoneInfo('America/New_York'), 10)
         self.assertEqual(report['valued'], 2)
         self.assertEqual(report['status'], 'ok')
         self.assertEqual(muse.return_value.player.call_count, 1)
+        self.assertEqual(muse.return_value.position.call_count, 1)
+        self.assertEqual(report['candidates'][0]['position_source'], 'https://statmuse.com/player')
         self.assertEqual(len(report['venues']['Kalshi']['picks']), 1)
         messages = payloads(report)
         self.assertEqual(len(messages), 2)

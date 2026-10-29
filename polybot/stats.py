@@ -2,15 +2,18 @@
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 
 from .http import SourceError
 
 POSITIONS = ('PG', 'SG', 'SF', 'PF', 'C')
+POSITION_NAMES = {'Point Guard': 'PG', 'Shooting Guard': 'SG', 'Small Forward': 'SF',
+                  'Power Forward': 'PF', 'Center': 'C'}
 TEAM_ALIASES = {'GS': 'GSW', 'NO': 'NOP', 'NY': 'NYK', 'PHO': 'PHX', 'SA': 'SAS',
                 'BRK': 'BKN', 'CHO': 'CHA'}
 TEAMS = {'ATL','BKN','BOS','CHA','CHI','CLE','DAL','DEN','DET','GSW','HOU','IND',
@@ -48,6 +51,7 @@ class PlayerStats:
     prior_usage: float | None
     games: list[GameLog]
     profile: str
+    log_sources: list[str] = field(default_factory=list)
 
 
 def table_rows(soup):
@@ -59,7 +63,7 @@ def table_rows(soup):
         yield table, headers
 
 
-def parse_usage(html):
+def parse_usage(html, name=None, season_end=None):
     soup = BeautifulSoup(html, 'html.parser')
     for table, headers in table_rows(soup):
         if 'USG%' not in headers:
@@ -68,14 +72,52 @@ def parse_usage(html):
             cells = row.select('td')
             if len(cells) != len(headers):
                 continue
+            if season_end is not None:
+                label = f'{season_end-1}-{str(season_end)[-2:]}'
+                if 'SEASON' not in headers or cells[headers.index('SEASON')].get_text(strip=True) != label:
+                    continue
             try:
                 usage = float(cells[headers.index('USG%')].get_text(strip=True)) / 100
             except ValueError:
                 continue
             link = row.find('a', href=re.compile(r'^/nba/player/[^/]+$'))
+            if link and name is not None:
+                canonical = re.sub(r'-\d+$', '', link['href'].rsplit('/', 1)[-1])
+                if normalize(canonical) != normalize(name):
+                    continue
             if link and 0 < usage < 1:
                 return usage, urljoin('https://www.statmuse.com', link['href'])
+    # Some guest pages omit the table but still publish the answer in the H1.
+    # Read that visible headline only; do not extract gated table data/scripts.
+    heading = soup.find('h1')
+    if heading and name is not None and season_end is not None:
+        link = heading.find('a', href=re.compile(r'^/nba/player/[^/]+$'))
+        match = re.fullmatch(r'.+? (?:has|had) a usage percentage of (\d+(?:\.\d+)?) '
+                             r'(this season|in \d{4}-\d{2})\.', heading.get_text(' ', strip=True))
+        now = datetime.now(ZoneInfo('America/New_York'))
+        current_season = now.year + (now.month >= 10)
+        period = f'in {season_end-1}-{str(season_end)[-2:]}'
+        if link and match and (match[2] == period or (match[2] == 'this season' and season_end == current_season)):
+            canonical = re.sub(r'-\d+$', '', link['href'].rsplit('/', 1)[-1])
+            usage = float(match[1])/100
+            if normalize(canonical) == normalize(name) and 0 < usage < 1:
+                return usage, urljoin('https://www.statmuse.com', link['href'])
     raise SourceError('StatMuse: usage percentage or canonical player link missing')
+
+
+def parse_position(html, name):
+    """Use the identified player's profile heading, never a G/F guess or sidebar."""
+    soup = BeautifulSoup(html, 'html.parser')
+    heading = soup.find('h1')
+    title = soup.find('title')
+    if not heading or normalize(heading.get_text(' ', strip=True)) != normalize(name):
+        raise SourceError(f'StatMuse: position profile identity mismatch for {name}')
+    if title:
+        text = title.get_text(' ', strip=True)
+        for label, position in POSITION_NAMES.items():
+            if text.endswith(f' {label} | StatMuse'):
+                return position
+    raise SourceError(f'StatMuse: specific primary position missing for {name}')
 
 
 def parse_logs(html, before):
@@ -114,26 +156,90 @@ def parse_logs(html, before):
     return sorted(games.values(), key=lambda g: g.date, reverse=True)
 
 
+def parse_espn_logs(data, before):
+    """Public ESPN fallback; regular-season, played, completed games only."""
+    labels = data.get('labels', [])
+    if not {'MIN', 'PTS'}.issubset(labels):
+        raise SourceError('ESPN: game-log labels missing')
+    metadata = data.get('events', {})
+    games = {}
+    for season in data.get('seasonTypes', []):
+        if not season.get('displayName', '').endswith(' Regular Season'):
+            continue
+        for category in season.get('categories', []):
+            if category.get('type') != 'event':
+                continue
+            for entry in category.get('events', []):
+                event = metadata.get(str(entry.get('eventId')), {})
+                values = entry.get('stats', [])
+                if len(values) != len(labels) or event.get('gameResult') not in ('W', 'L'):
+                    continue
+                try:
+                    played = datetime.fromisoformat(event['gameDate'].replace('Z', '+00:00')).astimezone(
+                        ZoneInfo('America/New_York')).date()
+                    minutes_text = str(values[labels.index('MIN')])
+                    minutes = (float(minutes_text.split(':')[0]) + float(minutes_text.split(':')[1])/60
+                               if ':' in minutes_text else float(minutes_text))
+                    points = int(values[labels.index('PTS')])
+                    opponent = team(event['opponent']['abbreviation'])
+                except (KeyError, ValueError, IndexError):
+                    continue
+                if played < before and minutes > 0 and opponent in TEAMS:
+                    games[(played, opponent)] = GameLog(played, opponent, points, minutes)
+    return sorted(games.values(), key=lambda g: g.date, reverse=True)
+
+
 class StatMuse:
     def __init__(self, http):
         self.http = http
+        self.usage_cache = {}
+        self.position_cache = {}
 
     def usage(self, name, season_end):
+        key = (normalize(name), season_end)
+        if key in self.usage_cache:
+            return self.usage_cache[key]
         label = f'{season_end - 1}-{str(season_end)[-2:]}'
-        url = 'https://www.statmuse.com/nba/ask/' + slug(f'{name} usage percentage in {label}')
-        usage, profile = parse_usage(self.http.get(url, ttl=6*3600))
-        canonical_name = re.sub(r'-\d+$', '', profile.rsplit('/', 1)[-1])
-        if normalize(canonical_name) != normalize(name):
-            raise SourceError(f'StatMuse: player identity mismatch for {name}')
-        return usage, profile
+        failures = []
+        for wording in ('usage percentage', 'usage rate'):
+            url = 'https://www.statmuse.com/nba/ask/' + slug(f'{name} {wording} in {label}')
+            try:
+                result = parse_usage(self.http.get(url, ttl=6*3600), name, season_end)
+                self.usage_cache[key] = result
+                return result
+            except SourceError as exc:
+                failures.append(str(exc))
+        raise SourceError(f'StatMuse: usage unavailable for {name} in {label}; {failures[-1]}')
 
-    def player(self, name, as_of):
+    def position(self, name, as_of):
+        key = normalize(name)
+        if key not in self.position_cache:
+            _, profile = self.usage(name, as_of.year + (as_of.month >= 10))
+            html = self.http.get(profile, ttl=6*3600)
+            self.position_cache[key] = parse_position(html, name), profile
+        return self.position_cache[key]
+
+    def player(self, name, as_of, athlete_id=None):
         season_end = as_of.year + (as_of.month >= 10)
         usage, profile = self.usage(name, season_end)
         all_games = []
+        sources = []
         for year in (season_end, season_end - 1, season_end - 2):
-            html = self.http.get(profile + '/game-log', {'seasonYear': year}, ttl=6*3600)
-            all_games.extend(parse_logs(html, as_of))
+            games = []
+            try:
+                html = self.http.get(profile + '/game-log', {'seasonYear': year}, ttl=6*3600)
+                games = parse_logs(html, as_of)
+            except SourceError:
+                pass
+            source = f'StatMuse season {year}'
+            if not games and athlete_id:
+                url = f'https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba/athletes/{athlete_id}/gamelog'
+                data = self.http.json(url, {'season': year}, ttl=6*3600)
+                games = parse_espn_logs(data, as_of)
+                source = f'ESPN public fallback season {year}'
+            if games:
+                sources.append(source)
+                all_games.extend(games)
             if len(all_games) >= 82:
                 break
         all_games = sorted({(g.date, g.opponent): g for g in all_games}.values(),
@@ -144,7 +250,7 @@ class StatMuse:
             prior_usage, _ = self.usage(name, season_end - 1)
         except SourceError:
             prior_usage = None
-        return PlayerStats(name, usage, prior_usage, all_games, profile)
+        return PlayerStats(name, usage, prior_usage, all_games, profile, sources)
 
 
 def parse_defense(html, as_of):
