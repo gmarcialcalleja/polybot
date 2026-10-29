@@ -62,13 +62,15 @@ def estimate(stats, threshold, position, ranks, as_of, spread):
                     baseline_rate, len(baseline), minutes, notes)
 
 
-def value(probability, price, kelly_fraction=0.25):
-    if not 0 < price < 1 or not 0 <= probability <= 1:
+def value(probability, price, kelly_fraction=0.25, fee_per_share=0):
+    cost = price + fee_per_share
+    if not 0 < price < 1 or not 0 <= probability <= 1 or fee_per_share < 0 or cost >= 1:
         raise ValueError('invalid probability or contract price')
-    edge = probability - price
-    return {'edge': edge, 'ev_per_dollar': probability/price - 1,
-            'expected_roi': probability/price - 1, 'win_roi': 1/price - 1,
-            'fractional_kelly': max(0, edge/(1-price))*kelly_fraction}
+    edge = probability - cost
+    return {'edge': edge, 'raw_edge': probability-price, 'cost_per_share': cost,
+            'ev_per_dollar': probability/cost - 1,
+            'expected_roi': probability/cost - 1, 'win_roi': 1/cost - 1,
+            'fractional_kelly': max(0, edge/(1-cost))*kelly_fraction}
 
 
 def high_roi_picks(candidates, count=3):

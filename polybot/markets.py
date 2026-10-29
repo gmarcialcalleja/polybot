@@ -118,7 +118,7 @@ def parse_contract(market, event):
     yes = next((i for i, x in enumerate(outcomes) if x.lower() in ('yes', 'over')), None)
     if yes is None or len(tokens) != len(outcomes):
         return None
-    return {'id': market['id'], 'player': name, 'threshold': threshold, 'token': tokens[yes],
+    return {'id': market['id'], 'venue': 'Polymarket', 'player': name, 'threshold': threshold, 'token': tokens[yes],
             'event': event['slug'], 'question': question,
             'url': f"https://polymarket.com/event/{event['slug']}?tid={market['id']}",
             'fee_enabled': bool(market.get('feesEnabled')), 'fee_schedule': market.get('feeSchedule'),

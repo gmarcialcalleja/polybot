@@ -9,9 +9,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .http import Http, SourceError
+from . import kalshi
 from .markets import (available, contracts, event_spread, nba_events, quote, rosters, slate)
 from .model import estimate, high_roi_picks, top_picks, value
-from .report import payload, send
+from .report import payloads, send
 from .stats import POSITIONS, StatMuse, defense, normalize, team
 
 
@@ -19,7 +20,10 @@ def analyze(http, day, tz, stake):
     report = {'date': str(day), 'timezone': str(tz), 'generated_at': datetime.now(timezone.utc).isoformat(),
               'status': 'ok', 'contracts_found': 0, 'valued': 0, 'picks': [], 'candidates': [],
               'skipped': [], 'sources': {}, 'unit_usd': stake, 'high_roi_picks': [],
-              'high_roi_contracts': 0}
+              'high_roi_contracts': 0, 'venues': {
+                  name: {'venue': name, 'status': 'ok', 'contracts_found': 0, 'valued': 0,
+                         'picks': [], 'high_roi_picks': [], 'high_roi_contracts': 0}
+                  for name in ('Polymarket', 'Kalshi')}}
     try:
         games = slate(http, day, tz)
         report['games'] = [{'teams': [s['team'] for s in g['teams']], 'start': g['start'].isoformat()}
@@ -27,12 +31,24 @@ def analyze(http, day, tz, stake):
         if not games:
             report['message'] = 'No NBA games scheduled today.'
             return report
-        events = nba_events(http, day, tz)
-        props = contracts(events)
+        events, props = [], []
+        for venue in report['venues']:
+            try:
+                if venue == 'Polymarket':
+                    events = nba_events(http, day, tz)
+                    discovered = contracts(events)
+                else:
+                    discovered = kalshi.contracts(http, day)
+                report['venues'][venue]['contracts_found'] = len(discovered)
+                props.extend(discovered)
+            except (SourceError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
+                report['venues'][venue]['status'] = 'failed'
+                report['venues'][venue]['error'] = (str(exc) if isinstance(exc, SourceError)
+                                                    else f'{venue}: unexpected discovery schema')
         report['contracts_found'] = len(props)
         if not props:
             report['message'] = 'No open full-game player-points contracts are published for today yet.'
-            return report
+            return finalize(report)
         ranks, source = defense(http, day)
         report['sources']['defense'] = source
         players = rosters(http, games)
@@ -43,6 +59,7 @@ def analyze(http, day, tz, stake):
         now = datetime.now(timezone.utc)
         for contract in props:
             name = contract['player']
+            venue = contract['venue']
             key = normalize(name)
             player = players.get(key)
             try:
@@ -72,8 +89,10 @@ def analyze(http, day, tz, stake):
                 stats = stats_cache[key]
                 model = estimate(stats, contract['threshold'], position, ranks, day,
                                  event_spread(events, player))
-                market_quote = quote(http, contract, stake)
-                metrics = value(model.probability, market_quote['price'])
+                market_quote = (kalshi.quote(http, contract, stake) if venue == 'Kalshi'
+                                else quote(http, contract, stake))
+                metrics = value(model.probability, market_quote['price'],
+                                fee_per_share=market_quote.get('fee_per_share', 0))
                 report['valued'] += 1
                 candidate = {**contract, **market_quote, **metrics, 'player': player['name'],
                              'team': player['team'], 'position': position, 'opponent': player['opponent'],
@@ -82,20 +101,21 @@ def analyze(http, day, tz, stake):
                 candidate.pop('teams', None)
                 candidates.append(candidate)
             except SourceError as exc:
-                report['skipped'].append({'player': name, 'market': contract['id'], 'reason': str(exc)})
+                report['skipped'].append({'player': name, 'market': contract['id'],
+                                          'venue': venue, 'reason': str(exc)})
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                report['skipped'].append({'player': name, 'market': contract['id'], 'venue': venue,
+                                          'reason': f'{venue}: unexpected contract or quote schema'})
+                report['venues'][venue]['status'] = 'degraded'
+                report['venues'][venue]['error'] = 'A contract or quote had an unsupported schema.'
         report['candidates'] = candidates
-        report['picks'] = top_picks(candidates)
-        report['high_roi_picks'] = high_roi_picks(candidates)
-        report['high_roi_contracts'] = sum(p['expected_roi'] > 1 for p in candidates)
-        report['skipped_reasons'] = dict(Counter(s['reason'] for s in report['skipped']))
         if stats_errors:
-            report['status'] = 'degraded'
-            report['error'] = f'{len(stats_errors)} player stats fetches failed; see the report artifact.'
-        if not report['picks']:
-            report['message'] = ('No contracts could be valued; screening reasons are listed below.'
-                                 if not report['valued'] else
-                                 'No positive-edge picks among the contracts that could be valued.')
-        return report
+            for venue, data in report['venues'].items():
+                if data['status'] != 'failed' and any(s['venue'] == venue and normalize(s['player']) in stats_errors
+                                                     for s in report['skipped']):
+                    data['status'] = 'degraded'
+                    data['error'] = 'Some player stats fetches failed; see the report artifact.'
+        return finalize(report)
     except SourceError as exc:
         report['status'] = 'failed'
         report['error'] = str(exc)
@@ -106,6 +126,30 @@ def analyze(http, day, tz, stake):
         report['error'] = 'A public source returned an unexpected schema; inspect the source adapters.'
         report['message'] = 'Data unavailable. No picks generated.'
         return report
+
+
+def finalize(report):
+    """Choose separate top-three lists and preserve failures on either venue."""
+    for venue, data in report['venues'].items():
+        candidates = [p for p in report['candidates'] if p['venue'] == venue]
+        data['valued'] = len(candidates)
+        data['picks'] = top_picks(candidates)
+        data['high_roi_picks'] = high_roi_picks(candidates)
+        data['high_roi_contracts'] = sum(p['expected_roi'] > 1 for p in candidates)
+        data['skipped_reasons'] = dict(Counter(s['reason'] for s in report['skipped'] if s['venue'] == venue))
+        data['message'] = ('Data unavailable for this exchange.' if data['status'] == 'failed' else
+                           'No open full-game player-points contracts are published for today yet.'
+                           if not data['contracts_found'] else
+                           'No contracts could be valued; screening reasons are listed below.' if not data['valued'] else
+                           'No positive-edge picks among the contracts that could be valued.')
+    report['picks'] = [p for data in report['venues'].values() for p in data['picks']]
+    report['high_roi_picks'] = [p for data in report['venues'].values() for p in data['high_roi_picks']]
+    report['high_roi_contracts'] = sum(d['high_roi_contracts'] for d in report['venues'].values())
+    report['skipped_reasons'] = dict(Counter(s['reason'] for s in report['skipped']))
+    statuses = [d['status'] for d in report['venues'].values()]
+    report['status'] = ('failed' if all(s == 'failed' for s in statuses) else
+                        'degraded' if any(s != 'ok' for s in statuses) else 'ok')
+    return report
 
 
 def main():
@@ -133,7 +177,8 @@ def main():
         stats = StatMuse(http).player('LeBron James', today)
         result = {'defense': source, 'positions': len(ranks), 'game_logs': len(stats.games),
                   'usage': stats.usage, 'prior_usage': stats.prior_usage, 'profile': stats.profile,
-                  'nba_events_today': len(nba_events(http, today, tz))}
+                  'nba_events_today': len(nba_events(http, today, tz)),
+                  'kalshi_points_contracts_today': len(kalshi.contracts(http, today))}
         print(json.dumps(result, indent=2))
         return 0
     webhook = os.environ.get('DISCORD_WEBHOOK_URL', '')
@@ -143,14 +188,16 @@ def main():
     folder = Path('reports')
     folder.mkdir(exist_ok=True)
     (folder / f'{day}.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')
-    message = payload(report)
-    (folder / f'{day}-discord.json').write_text(json.dumps(message, indent=2, ensure_ascii=False), encoding='utf-8')
-    print(message['content'])
+    messages = payloads(report)
+    (folder / f'{day}-discord.json').write_text(json.dumps(messages, indent=2, ensure_ascii=False), encoding='utf-8')
+    for message in messages:
+        print(message['content'])
     for pick in report['picks']:
         print(f"{pick['player']} {pick['threshold']}+ | edge +{pick['edge']*100:.1f} pp")
     if not args.dry_run:
-        send(webhook, message)
-        print('Discord report delivered.')
+        for message in messages:
+            send(webhook, message)
+        print('Discord exchange reports delivered.')
     return 1 if report['status'] in ('failed', 'degraded') else 0
 
 

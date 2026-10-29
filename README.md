@@ -1,6 +1,6 @@
 # Polybot: daily NBA points EV report
 
-Python + BeautifulSoup bot that posts up to three distinct-player Polymarket points opportunities plus up to three distinct-player **estimated ROI above 100%** alerts to a Discord channel. GitHub Actions schedules it for **2:00 p.m. America/New_York every day**, including daylight saving time. GitHub can queue or delay scheduled jobs, so delivery is shortly after the scheduled start, not guaranteed at exactly 14:00. Reports are still sent when no games, no player contracts, or no qualifying picks are available.
+Python + BeautifulSoup bot that posts separate **Polymarket and Kalshi** NBA player-points reports to a Discord channel. Each exchange gets up to three distinct-player opportunities plus up to three distinct-player **estimated ROI above 100%** alerts. GitHub Actions schedules it for **2:00 p.m. America/New_York every day**, including daylight saving time. GitHub can queue or delay scheduled jobs, so delivery is shortly after the scheduled start, not guaranteed at exactly 14:00. Reports are still sent when no games, no player contracts, or no qualifying picks are available.
 
 ## Add your Discord webhook privately
 
@@ -9,7 +9,7 @@ Python + BeautifulSoup bot that posts up to three distinct-player Polymarket poi
 3. Select **New repository secret**. Name it exactly **`DISCORD_WEBHOOK_URL`** and paste the entire URL as its value.
 4. Open **Actions → Daily NBA Discord report → Run workflow**. Keep `dry_run` checked for live-source diagnostics and a preview artifact; uncheck it to deliver to Discord.
 
-You do not need to send anyone the URL, commit it, or add a separate Discord bot token. No Polymarket API key, wallet, or private key is needed: this program only reads public data and publishes a report. It never places trades. No Kalshi integration is included because this project targets Polymarket.
+You do not need to send anyone the URL, commit it, or add a separate Discord bot token. Neither Polymarket nor Kalshi requires an API key for the public data used here. This program only reads data and publishes reports; it never places trades. Both exchange reports use the same existing `DISCORD_WEBHOOK_URL` secret.
 
 Optional: in **Settings → Secrets and variables → Actions → Variables**, add `UNIT_USD` (default `10`). This is the dollar size used to check ask depth and minimum order size. It does not move money.
 
@@ -26,15 +26,25 @@ The supplied NBA Points Prop EV Analyzer guide is the algorithm reference, not a
 * **Blowout:** subtract 0.035 from probability when the absolute game spread exceeds 10.5. Use ESPN's spread when available, otherwise the highest-volume Polymarket spread for that matchup. Missing spreads are withheld.
 * **Markets:** public Gamma NBA discovery, fully paginated within the date window, then CLOB order books for full-game `points` contracts. Half-point overs such as 24.5 translate to 25+; YES is selected by outcome label rather than assumed array position. Integer O/U lines, unders, combinations, quarters, team totals and unsupported wording are excluded. If player props have not been listed by report time, the report says so.
 * **Price:** best executable YES ask, with at least `UNIT_USD` available at that price and enough shares to meet the venue's minimum order. Stale books and nonzero/unknown fee schedules are withheld. No midpoint is presented as an executable buy price.
-* **Ranking:** `edge = probability − ask`; retain strictly positive edges, choose up to three distinct players by descending edge. `EV per $1 = probability / ask − 1`. Quarter-Kelly output is `0.25 × max(0, (probability − ask)/(1 − ask))`.
+* **Ranking:** `cost = ask + entry_fee_per_share`; `edge = probability − cost`. Retain strictly positive edges and choose up to three distinct players by descending edge **separately for each exchange**. `EV per $1 = probability / cost − 1`. Quarter-Kelly output is `0.25 × max(0, (probability − cost)/(1 − cost))`. The artifact also preserves raw price-only edge.
+
+### Kalshi public market integration
+
+Discovery uses the `KXNBAPTS` (NBA Player Points) series, fetching every cursor page from the public REST API. Event tickers establish the originally scheduled local date and team matchup; closing timestamps are not treated as game start times. Exact player names are matched to ESPN rosters, and the existing points model, availability rules and pregame checks apply. The parser checks the title, strike, $1 payout and full-game settlement wording. Protected, combined-stat, quarter, playoff-series and other unsupported series are excluded. This integration does not add the last-20-game or other stat-category models discussed as future work.
+
+Kalshi's order book returns YES bids and NO bids. The executable **YES ask is `1 − highest NO bid`**, with the corresponding NO bid size as available depth. A fresh REST snapshot is fetched for each valuation; Kalshi supplies no book timestamp here, so the artifact labels its timestamp as retrieval time rather than last book update time.
+
+Fee type and multiplier come from live series metadata, including event overrides. Supported general quadratic taker fees are `0.07 × multiplier × contracts × ask × (1 − ask)`. Total entry cost is rounded upward to a centicent per the published July 2026 schedule. The bot selects a whole-contract quantity whose total including fees fits `UNIT_USD`, requires enough depth at the best ask, and calculates ROI and Kelly from the resulting cost per share. Unknown fee types/multipliers are withheld. Fee waivers and third-party broker charges are not modeled; the exchange's general fee is used. Settlement notes disclose that DNP/canceled contracts can settle at a fair price; probabilities/ROI assume normal settlement after participation.
+
+If one exchange's discovery fails, the other exchange is still processed. The failed exchange gets an explicit unavailable status, the overall run is degraded (or failed if both fail), and artifacts retain exchange-specific counts and skip reasons. Shared stats-source failures can affect both reports. Two separate Discord messages keep each exchange's picks and ROI alerts within Discord's embed limits.
 
 Reports include model probability, ask/implied probability, edge in percentage points, EV, quarter-Kelly, cohort sizes, liquidity and modeling notes. They do not invent pace, lineup, tactical or injury explanations. No qualifying picks is a valid result; the bot never fills the list with sample picks.
 
 ### ROI alerts and screening counts
 
-**Estimated expected ROI** is `model_probability / price − 1`. Alerts require **strictly greater than 100%**, ranked by estimated ROI independently of the top-edge list, with up to three distinct players shown. A contract appearing in both lists is displayed once with an `ROI >100%` label. Existing eligibility, sample, injury and liquidity checks still apply.
+**Estimated expected ROI** is `model_probability / cost_including_fees − 1`. Alerts require **strictly greater than 100%**, ranked by estimated ROI independently of the top-edge list, with up to three distinct players shown per exchange. A contract appearing in both lists is displayed once with an `ROI >100%` label. Existing eligibility, sample, injury and liquidity checks still apply.
 
-**Net ROI if it wins** is `1 / price − 1`; this is the winning payout's profit, not an expectation. For example, a $0.25 contract with an estimated 60% chance has estimated ROI of **+140%**, net ROI if it wins of **+300%**, and a losing outcome of **−100%**. Model errors can make estimated ROI inaccurate.
+**Net ROI if it wins** is `1 / cost_including_fees − 1`; this is the winning payout's profit, not an expectation. For example, a $0.25 contract with zero fees and an estimated 60% chance has estimated ROI of **+140%**, net ROI if it wins of **+300%**, and a losing outcome of **−100%**. Kalshi entry fees reduce those returns. Model errors can make estimated ROI inaccurate.
 
 `Found` counts parsed open points contracts; `valued` counts contracts that passed the checks and received probability/price calculations; picks are positive-edge selections. The Discord summary includes the three most common skip reasons. If zero contracts were valued, ROI was **not assessed**, rather than assessed and found unattractive. For the initial late-night October 28 preview, all 222 contracts were skipped because their games had already started.
 
@@ -56,7 +66,7 @@ For an actual local delivery, set `DISCORD_WEBHOOK_URL` in your process environm
 
 ## Operation and troubleshooting
 
-* Every run writes `reports/YYYY-MM-DD.json` plus a Discord payload preview. Actions uploads them as a 14-day artifact, including screening skip reasons. Public artifacts contain player/market data, never the webhook.
+* Every run writes `reports/YYYY-MM-DD.json` (including per-exchange results) plus a JSON array of the two Discord payload previews. Actions uploads them as a 14-day artifact, including screening skip reasons. Public artifacts contain player/market data, never the webhook.
 * StatMuse/defense responses have short local caches. Cache files, local environments, secrets and generated reports are ignored by Git. Prices are always fetched fresh.
 * Source failures produce an explicit data-unavailable report and a failing Actions run. Individual StatMuse failures mark the report degraded; missing liquidity or ineligible players are recorded as skips. A missing webhook fails before delivery without printing the secret.
 * Discord posts are not automatically retried after a timeout, to avoid duplicate deliveries. Re-running a successful job or manually delivering a second report can post twice.
@@ -64,3 +74,5 @@ For an actual local delivery, set `DISCORD_WEBHOOK_URL` in your process environm
 * Scheduled workflows run from `main`. GitHub can disable public-repository schedules after 60 days with no repository activity; re-enable them in Actions if that occurs.
 
 References: [Polymarket public market data](https://docs.polymarket.com/market-data/overview), [order books](https://docs.polymarket.com/market-data/prices-order-books), [GitHub scheduled workflows and timezone support](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
+
+Kalshi references: [public market data](https://docs.kalshi.com/getting_started/quick_start_market_data), [market order books](https://docs.kalshi.com/api-reference/market/get-market-orderbook), [series fee metadata](https://docs.kalshi.com/api-reference/market/get-series), [fee schedule](https://kalshi.com/docs/kalshi-fee-schedule.pdf).
