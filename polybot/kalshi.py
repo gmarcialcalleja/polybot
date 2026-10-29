@@ -63,7 +63,8 @@ def parse_contract(market, day, fee_type, fee_multiplier):
     closed = datetime.fromisoformat(market['close_time'].replace('Z', '+00:00'))
     if not opened <= now < closed or market.get('result'):
         return None
-    return {'id': market['ticker'], 'venue': 'Kalshi', 'player': name, 'threshold': threshold,
+    return {'id': market['ticker'], 'venue': 'Kalshi', 'side': 'over', 'outcome': 'YES',
+            'player': name, 'threshold': threshold,
             'event': event, 'question': market['title'], 'teams': teams,
             'url': f'https://kalshi.com/markets/kxnbapts/nba-player-points/{event.lower()}',
             'fee_type': fee_type, 'fee_multiplier': fee_multiplier,
@@ -104,7 +105,8 @@ def contracts(http, day):
                                   metadata.get('fee_multiplier_override')
                                   if metadata.get('fee_multiplier_override') is not None else fee_multiplier)
         if contract:
-            results[contract['id']] = contract
+            results[(contract['id'], 'over')] = contract
+            results[(contract['id'], 'under')] = {**contract, 'side': 'under', 'outcome': 'NO'}
     return list(results.values())
 
 
@@ -125,14 +127,15 @@ def quote(http, contract, stake):
     if not multiplier.is_finite() or multiplier < 0:
         raise SourceError('Kalshi: missing or invalid fee multiplier')
     data = http.json(BASE + f"/markets/{contract['id']}/orderbook")
-    # REST returns bids only: the highest NO bid supplies the cheapest YES ask.
-    levels = data.get('orderbook_fp', {}).get('no_dollars')
+    # Opposite-side bids supply the executable ask for the side being purchased.
+    under = contract.get('side', 'over') == 'under'
+    levels = data.get('orderbook_fp', {}).get('yes_dollars' if under else 'no_dollars')
     if levels is None:
-        raise SourceError('Kalshi: expected fixed-point NO bid levels')
+        raise SourceError('Kalshi: expected fixed-point opposite-side bid levels')
     bids = [(number(p), number(n)) for p, n in levels]
     bids = [(p, n) for p, n in bids if 0 < p < 1 and n > 0]
     if not bids:
-        raise SourceError('Kalshi: no executable YES asks')
+        raise SourceError(f"Kalshi: no executable {'NO' if under else 'YES'} asks")
     best_no = max(p for p, _ in bids)
     price = 1-best_no
     depth_shares = sum(n for p, n in bids if p == best_no)

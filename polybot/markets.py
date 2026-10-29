@@ -98,7 +98,7 @@ def parse_contract(market, event):
             or not market.get('enableOrderBook')):
         return None
     question = market.get('question', '')
-    # Full-game points only. No threes, rebounds, combinations, quarters or unders.
+    # Full-game points only. No threes, rebounds, combinations or quarters.
     match = re.fullmatch(r'(.+?):\s*Points O/U (\d+(?:\.\d+)?)', question, flags=re.I)
     if match:
         name, line = match.groups()
@@ -118,7 +118,10 @@ def parse_contract(market, event):
     yes = next((i for i, x in enumerate(outcomes) if x.lower() in ('yes', 'over')), None)
     if yes is None or len(tokens) != len(outcomes):
         return None
-    return {'id': market['id'], 'venue': 'Polymarket', 'player': name, 'threshold': threshold, 'token': tokens[yes],
+    no = next((i for i, x in enumerate(outcomes) if x.lower() in ('no', 'under')), None)
+    return {'id': market['id'], 'venue': 'Polymarket', 'side': 'over', 'outcome': 'YES',
+            'player': name, 'threshold': threshold, 'token': tokens[yes],
+            'no_token': tokens[no] if no is not None else None,
             'event': event['slug'], 'question': question,
             'url': f"https://polymarket.com/event/{event['slug']}?tid={market['id']}",
             'fee_enabled': bool(market.get('feesEnabled')), 'fee_schedule': market.get('feeSchedule'),
@@ -135,7 +138,11 @@ def contracts(events):
             except (ValueError, TypeError, KeyError, IndexError):
                 raise SourceError('Polymarket: malformed points contract') from None
             if contract:
-                result[contract['id']] = contract
+                result[(contract['id'], 'over')] = contract
+                if contract.get('no_token'):
+                    result[(contract['id'], 'under')] = {
+                        **contract, 'side': 'under', 'outcome': 'NO', 'token': contract['no_token'],
+                        'settlement_note': 'Model assumes participation and normal settlement; review the market rules for inactivity or cancellation.'}
     return list(result.values())
 
 

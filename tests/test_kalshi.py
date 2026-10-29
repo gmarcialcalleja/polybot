@@ -86,7 +86,8 @@ class KalshiTests(unittest.TestCase):
                 return {'markets': [m], 'cursor': ''}
         h = Http()
         result = kalshi.contracts(h, date(2026, 10, 29))
-        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result), 2)
+        self.assertEqual({c['side'] for c in result}, {'over', 'under'})
         self.assertEqual(result[0]['fee_multiplier'], 2)
         self.assertEqual(sum('/markets' in u for u, _ in h.calls), 2)
 
@@ -131,7 +132,7 @@ class VenueTests(unittest.TestCase):
         self.assertEqual(report['candidates'][0]['position_source'], 'https://statmuse.com/player')
         self.assertEqual(len(report['venues']['Kalshi']['picks']), 1)
         messages = payloads(report)
-        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(messages), 4)
         self.assertGreater(report['candidates'][0]['expected_roi'], report['candidates'][1]['expected_roi'])
 
     def test_maximum_venue_report_fits_discord_limits(self):
@@ -180,10 +181,10 @@ class VenueTests(unittest.TestCase):
         other.assert_called_once()
         self.assertEqual(report['status'], 'degraded')
         messages = payloads(report)
-        self.assertEqual(len(messages), 2)
+        self.assertEqual(len(messages), 4)
         self.assertIn('Polymarket unavailable', messages[0]['content'])
-        self.assertIn('Kalshi NBA points EV report', messages[1]['content'])
-        self.assertNotIn('Polymarket unavailable', messages[1]['content'])
+        self.assertIn('Kalshi NBA points EV report', messages[2]['content'])
+        self.assertNotIn('Polymarket unavailable', messages[2]['content'])
 
 
 if __name__ == '__main__':
