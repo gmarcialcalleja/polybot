@@ -2,7 +2,9 @@ name: Daily NBA Discord report
 
 on:
   schedule:
-    - cron: '0 14 * * *'
+    # Five hours earlier to compensate for observed multi-hour trigger delays.
+    # Delivery still depends on GitHub's scheduler; 2 p.m. is not guaranteed.
+    - cron: '0 9 * * *'
       timezone: America/New_York
   workflow_dispatch:
     inputs:
