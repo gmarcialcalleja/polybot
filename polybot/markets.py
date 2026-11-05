@@ -4,6 +4,7 @@ import json
 import math
 import re
 from datetime import datetime, time, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 
 from .http import SourceError
 from .stats import normalize, team
@@ -124,7 +125,8 @@ def parse_contract(market, event):
             'no_token': tokens[no] if no is not None else None,
             'event': event['slug'], 'question': question,
             'url': f"https://polymarket.com/event/{event['slug']}?tid={market['id']}",
-            'fee_enabled': bool(market.get('feesEnabled')), 'fee_schedule': market.get('feeSchedule'),
+            'fee_enabled': market.get('feesEnabled'), 'fee_schedule': market.get('feeSchedule'),
+            'fee_type': market.get('feeType'),
             'teams': set(re.findall(r'^nba-([a-z]+)-([a-z]+)-', event['slug'])[0])
                      if re.match(r'^nba-[a-z]+-[a-z]+-', event['slug']) else set()}
 
@@ -161,6 +163,36 @@ def event_spread(events, player):
     return max(possibilities, default=(0, None), key=lambda x: x[0])[1]
 
 
+def fee_rate(contract):
+    """Use Gamma's per-market parameters, never legacy CLOB base_fee basis points."""
+    enabled = contract.get('fee_enabled')
+    if enabled is False:
+        return Decimal(0)
+    if enabled is not True:
+        raise SourceError('Polymarket: fee-enabled status unavailable')
+    schedule = contract.get('fee_schedule')
+    if not isinstance(schedule, dict):
+        raise SourceError('Polymarket: fee schedule unavailable')
+    try:
+        rate = Decimal(str(schedule['rate']))
+        if not rate.is_finite() or not 0 <= rate <= 1:
+            raise ValueError
+        if rate and (isinstance(schedule.get('exponent'), bool)
+                     or Decimal(str(schedule.get('exponent'))) != 1):
+            raise SourceError('Polymarket: unsupported fee exponent; expected 1')
+    except (KeyError, InvalidOperation, ValueError, TypeError):
+        raise SourceError('Polymarket: invalid or incomplete fee schedule') from None
+    return rate
+
+
+def fee_for_order(shares, price, rate):
+    """Published USDC taker fee: shares * rate * price * (1-price)."""
+    shares, price, rate = (Decimal(str(x)) for x in (shares, price, rate))
+    raw = shares*rate*price*(1-price)
+    # Published minimum charge and five-decimal fee precision.
+    return Decimal(0) if raw < Decimal('.00001') else raw.quantize(Decimal('.00001'), rounding=ROUND_HALF_UP)
+
+
 def quote(http, contract, stake):
     data = http.json(CLOB + '/book', {'token_id': contract['token']})
     asks = sorted((float(x['price']), float(x['size'])) for x in data.get('asks', []))
@@ -171,17 +203,26 @@ def quote(http, contract, stake):
     depth = sum(p*n for p, n in asks if p == price)
     if depth < stake:
         raise SourceError('Polymarket: insufficient depth at best ask')
-    if stake / price < float(data.get('min_order_size') or 0):
-        raise SourceError('Polymarket: unit below minimum order size')
     stamp = data.get('timestamp')
     if not stamp:
         raise SourceError('Polymarket: quote timestamp missing')
     quoted_at = datetime.fromtimestamp(float(stamp)/1000, timezone.utc)
     if not -60 <= (datetime.now(timezone.utc) - quoted_at).total_seconds() <= 900:
         raise SourceError('Polymarket: stale order book')
-    # Zero-fee sports contracts are common. Unknown or nonzero fees are withheld
-    # so a fee-free EV calculation cannot turn a losing contract into a pick.
-    schedule = contract['fee_schedule']
-    if contract['fee_enabled'] and (not schedule or float(schedule.get('rate', -1)) != 0):
-        raise SourceError('Polymarket: nonzero or unknown fee schedule')
-    return {'price': price, 'depth_usd': depth, 'timestamp': quoted_at.isoformat()}
+    rate = fee_rate(contract)
+    p, budget = Decimal(str(price)), Decimal(str(stake))
+    cost = p + rate*p*(1-p)
+    step = Decimal('.01')
+    shares = (budget/cost).quantize(step, rounding=ROUND_FLOOR)
+    # Rounding the order fee can put a boundary quantity just over budget.
+    while shares > 0 and shares*p + fee_for_order(shares, p, rate) > budget:
+        shares -= step
+    if shares <= 0 or shares < Decimal(str(data.get('min_order_size') or 0)):
+        raise SourceError('Polymarket: unit below minimum order size including fees')
+    fee = fee_for_order(shares, p, rate)
+    return {'price': price, 'depth_usd': depth, 'timestamp': quoted_at.isoformat(),
+            'shares': float(shares), 'fee_usd': float(fee), 'fee_per_share': float(fee/shares),
+            'fee_rate': float(rate), 'fee_exponent': 1 if rate else None,
+            'fee_source': 'Gamma market feesEnabled/feeSchedule',
+            'fee_formula': 'shares * rate * price * (1-price); USDC rounded to 5 decimals',
+            'fee_assumption': 'General taker entry fee; no rebates, broker charges or exit trade modeled.'}

@@ -121,8 +121,13 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(SourceError):
             quote(FakeHttp(), contract, 15)
         contract['fee_schedule']['rate'] = .05
+        # A nonzero rate without its curve exponent remains unsupported.
         with self.assertRaises(SourceError):
             quote(FakeHttp(), contract, 10)
+        contract['fee_schedule']['exponent'] = 1
+        priced = quote(FakeHttp(), contract, 10)
+        self.assertGreater(priced['fee_per_share'], 0)
+        self.assertLessEqual(priced['shares']*priced['price']+priced['fee_usd'], 10)
 
     def test_webhook_failures_do_not_leak_secrets(self):
         import requests
